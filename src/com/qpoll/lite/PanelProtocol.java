@@ -38,7 +38,10 @@ public final class PanelProtocol {
      * 结果 70 秒 35 次全报忙、空转 90 秒报假阴性。两件事要分清楚：
      * <b>它的返回码不可信，它的「发出去」这个动作本身是保场所必需的（仅限小线圈）。</b>
      */
-    static volatile boolean holdKeepAlive=true;
+    /* 1.4.35 定案（11-1）：保场期间一条 APDU 都不发（干睡），喂场代码整体退役。
+     * 证据链：K90 装死屏喂 DE 打断波形（1.4.5-1.4.10 六轮「只闪一下」，1.4.11 干睡复活）；
+     * 12T 活屏「必须喂场」系 1.3.4 时代推断——把兼容层租约漂移的锅记给了干睡，
+     * 11-1 干睡 A/B（保场查询 0 次）两轮全成平反。场的维持靠 QTag 寻卡配置本身。 */
     public static final byte[] D1=hex("00D1000000"), D8=hex("F0D8000005000000000E"), DE=hex("F0DE000001");
     private static final byte[] PIN=hex("00200001055265699919");
     private static final byte[] GEOMETRY=hex("F0C72006000228"), SCAN=hex("00120030FFFFFF");
@@ -416,40 +419,17 @@ public final class PanelProtocol {
              *
              * 所以 D4 之后按住 20 秒不撒手。这个 20 秒是实测能正常刷完的值，别乱动。
              *
-             * ⚠️ 别再拿 DE 当「忙闲指示灯」（1.3.1 踩过的坑，已回退）：
-             *    实机日志里 DE 从第 20 秒一路到第 90 秒、每次 6 毫秒就回话，
-             *    70 秒内一次「空闲」都没报过。可见 DE 回的字节根本不是忙闲状态，
-             *    按 payload[0]==1 判忙 = 把一个恒定值当忙信号，结果是白等 90 秒
-             *    再报「无法确认」，而屏其实早就刷好了。假阴性比假阳性更坑人。
+             * ⚠️ 保场期间一条命令都不发（1.4.35 定案，见类头喂场退役注释）：
+             *    ① DE 应答不可信——K90 上 70 秒 35 次恒值假信号，1.3.1 拿它当忙闲
+             *    门控 = 白等 90 秒报假阴性，屏其实早就刷好了；
+             *    ② K90 装死屏：DE 通信打断刷新波形（1.4.5~1.4.10 六轮「只闪一下」）；
+             *    ③ 12T 活屏：喂场也无益（11-1 干睡 A/B 平反，见类头）。
              */
             control.event("HOLD","刷新中，保持贴合别动（供能 20 秒）");
             long deadline=control.now()+HOLD_SECONDS*1000L;
             long nextTick=control.now()+1000L;
-            int sent=0,lost=0;
             while(control.now()<deadline) {
-                if(holdKeepAlive) {
-                    /*
-                     * 只为了「别让链路空着」，返回码一概不看：
-                     *   - 9000  正常
-                     *   - 68CA  屏正在升压刷新，暂时不应答 —— 不是错误，继续喂
-                     *   - 6986  屏报告正在刷新 —— 同样继续喂
-                     * 只要还能把包发出去，场就是活的，屏就能接着取电。
-                     */
-                    try {
-                        transport.exchange(DE,5000);
-                        sent++;
-                        lost=0;
-                    } catch(Exception e) {
-                        // 掉一次不算事（可能瞬时抖动）；连续三次才说明真贴不住了。
-                        if(++lost>=3) {
-                            control.event("HOLD_LOST","保场中断：连续 3 次发不出去（"
-                                    +e.getClass().getSimpleName()+"）。屏可能没刷完，请目视确认后再决定要不要重刷。");
-                            break;
-                        }
-                    }
-                } else {
-                    control.sleep(DEFAULT_POLL_MS);
-                }
+                control.sleep(DEFAULT_POLL_MS);
                 if(control.now()>=nextTick) {
                     long left=Math.max(0,(deadline-control.now()+999)/1000);
                     if(left>0)control.event("HOLD","还剩 "+left+" 秒 · 别松手别点停止");
@@ -457,8 +437,7 @@ public final class PanelProtocol {
                 }
                 pause(DEFAULT_POLL_MS);
             }
-            control.event("REFRESH_DONE","供能 " + HOLD_SECONDS + " 秒完成（保场查询 " + sent
-                    + " 次）；图已全部传完，请目视确认画面");
+            control.event("REFRESH_DONE","供能 " + HOLD_SECONDS + " 秒完成（干睡，零查询）；图已全部传完，请目视确认画面");
             return true;
         }
         control.event("REFRESH_UNCONFIRMED","刷新命令没有启动：SW="+String.format("%04X",finalStatus)
