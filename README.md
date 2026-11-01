@@ -1,6 +1,6 @@
 # 墨小七（QPoll Lite）
 
-用手机 NFC 直刷四色墨水屏手机壳的安卓 App。从 [QPollLab](https://github.com/yhl88890/huawei-nfc-eink-myron) 改造分支演进而来，本仓库是独立精简版：前台直连、零特权优先、设备画像双路适配。
+用手机 NFC 直刷四色墨水屏手机壳的安卓 App。从 [QPollLab](https://github.com/yhl88890/huawei-nfc-eink-myron) 改造分支演进而来，本仓库是独立精简版：前台直连、设备画像双路适配。
 
 ## 来源与致谢（代码出处）
 
@@ -34,10 +34,20 @@
 **2. 起决定性作用的是 Android 系统版本与 NFC 芯片行为，不是手机功率，更不是线圈。**
 前辈们长期把刷屏失败归因于手机型号/输出功率；本项目双机对照研究明白：真正的分路变量是 **Android 系统版本**（SDK 36+ 与 35 的 NFC 供能规则不同）叠加 **NFC 控制器芯片**（NXP SN220U 与 SN100U）的行为差异——K90 Pro Max（Android 17 / SN220U）走「装死屏」路，Note 12T Pro（Android 15 / SN100U）走「活屏」路（详见下表与源码注释）。屏的线圈大小只是配对特征，不是因果。一套参数不可能通吃，这是设备画像双路分支存在的原因；系统版本相同 + 芯片同族 + ROM 未深度魔改的机型，理论上归同一路。
 
-**3. Note 12T Pro 一类是零特权。**
-不 root、不装 Shizuku、不给 adb 授权——App 前台 + 反射隐藏接口就能完整刷屏（杀 Shizuku、清 KernelSU 授权、重装 APK 后连刷实测通过）。与 Note 12T Pro 芯片同族（SN100U）且系统版本相近的机型大概率同样零特权直跑，无需任何折腾。
+**3. Note 12T Pro 一类：App 进程零授权，但手机需要一次性 root 部署。**
 
-最干净的证据链：`adb uninstall` → 全新安装（所有运行时授权与 appops 清零）→ 全程不执行任何 `pm grant` / `appops set` / Shizuku 授权 → 直接贴屏刷图成功。日志里 Q-Poll 开关由**本进程自己发出**（`QTAG_ON … 返回 0（接受）`），Shizuku 进程当时根本没在运行，KernelSU 模块列表里也没有任何 NFC 相关模块。
+Note 12T Pro（SN100U / Android 15）的 NFC HAL **原生不认 Q-Poll**：要么直接拒绝（QTag 直发实测被拒），要么照发但把出站发现类型写死成 `00`（普通 NFC-A），而墨水屏只应答 `71`——这种机型**光靠 App 层无论给多大权限都没用**，必须在 NFC HAL 里把出站包的 `00` 改写成 `71`。这个改写只能以 root 身份部署：把 `libqpollhook.so` 注入 NFC HAL 进程，配一个 6 分钟租约开关，由 root 开机脚本在 App 运行期间自动续租约、App 退出后自动撤（不长期干扰公交卡/门禁卡）。部署脚本在仓库 `probe/` 目录。
+
+所以权限要求分两层，别混：
+
+| 层 | 12T Pro 一类（SN100U / A15） | K90 Pro Max 一类（SN220U / A16+） |
+|---|---|---|
+| **手机侧** | **必须 root** + 一次性部署 HAL 兼容层（`probe/` 脚本） | 不需要，原生支持 Q-Poll |
+| **App 进程** | 零授权：不给 root 授权、不装 Shizuku、不给 adb 权限，前台直跑 | 前台 + `WRITE_SECURE_SETTINGS`（Shizuku 或 adb 授一次） |
+
+「App 进程零授权」的真实证据链：在**已部署兼容层**的 12T 上，杀 Shizuku server、确认 App 不在 KernelSU 授权名单、`adb uninstall` → 全新安装（运行时授权与 appops 清零）→ 直接贴屏连刷正常，日志里 Q-Poll 开关由本进程自己发出。此时 HAL hook 已在内存里、租约由 root 开机脚本守护——**App 进程确实没拿任何特权，但手机系统侧的地基是 root 打的**。
+
+⚠️ **把没 root 的全新 12T Pro 装上本 App = 刷不了**：兼容层不存在，HAL 不认 Q-Poll，App 连屏都发现不了（租约过期时的实测表现就是「连屏都看不见」）。与此对应，原生支持 Q-Poll 的机型（如 K90）没 root 也能刷。
 
 ⚠️ 注意区分：`adb install` 是**电脑把安装包推给手机**，它不等于给 App 授予系统权限。「用 adb 装了包」和「App 运行时需要 adb 权限」是两件事。
 
@@ -120,7 +130,7 @@ if ((codes[i] & 3) != 1) lit++;   // 1 = 白；只有白不算
 
 | 机型 | NFC 控制器 | Android | 权限路径 |
 |---|---|---|---|
-| Redmi Note 12T Pro | NXP SN100U（小线圈屏） | 15 | **零特权**：前台 + 反射隐藏接口 |
+| Redmi Note 12T Pro | NXP SN100U（小线圈屏） | 15 | **手机需 root + 一次性部署 HAL 兼容层**（`probe/` 脚本）；部署后 App 日常零授权 |
 | Redmi K90 Pro Max | NXP SN220U（大线圈屏） | 17 | 前台 + 公开 vendor NCI API（需 `WRITE_SECURE_SETTINGS`，用 Shizuku 或 adb 授予；**不需要 root**） |
 
 **关于两块屏**：它们本质是**同款墨水屏**（同主控、同协议、同电泳膜），区别只是背面 NFC 收集线圈一大一小。谁配谁纯看**物理形状**——12T Pro 的手机壳背面有支架，小线圈屏靠在支架旁刚好与手机 NFC 天线对位；大线圈屏比 12T Pro 机身还宽一点，放上去形状对不上，而 K90 Pro Max 的机身正好配大线圈屏。这是物理适配问题，与屏本身的素质无关。
