@@ -92,6 +92,8 @@ public final class MainActivity extends Activity {
     private volatile File stopFile;
     private int revision;
     private long scanDeadline;
+    private long chargeStarted;
+    private int chargeTotalMs;
 
     private volatile IBinder bridgeBinder;
     private int bridgeUid = -1;
@@ -121,7 +123,7 @@ public final class MainActivity extends Activity {
      */
     private final Shizuku.UserServiceArgs bridgeArgs = new Shizuku.UserServiceArgs(
             new ComponentName("com.qpoll.lite", "com.qpoll.lite.ShellBridge"))
-            .tag("nfc-lite").version(69).daemon(false).processNameSuffix("nfc_shell");
+            .tag("nfc-lite").version(70).daemon(false).processNameSuffix("nfc_shell");
 
     private final ServiceConnection bridgeConnection = new ServiceConnection() {
         @Override public void onServiceConnected(ComponentName name, IBinder binder) {
@@ -578,18 +580,20 @@ public final class MainActivity extends Activity {
             }
         } catch (Throwable ignored) { }
         if (prepared == null) { Toast.makeText(this, "还没有图，先选一张", Toast.LENGTH_SHORT).show(); return; }
+        final int chargeSeconds = chargeSeconds();
         new AlertDialog.Builder(this)
                 .setTitle("写入这块墨水屏？")
                 .setMessage("会替换屏上当前的画面。\n\n风格：" + prepared.settings
+                        + "\n发送前充能：" + chargeSeconds + " 秒"
                         + "\n上电等待：" + PanelProtocol.POWER_MS + " ms（官方值）"
                         + "\n查电模式：" + (officialCheck() ? "官方（刷完才回）" : "快速（收到即回）")
                         + "\n屏幕类型：" + prepared.panelType
                         + "\n\n贴稳别动，全程保持本页在前台，直到提示结束。中途断开可能留下半张图。")
                 .setNegativeButton("再看看", null)
-                .setPositiveButton("开始刷新", (d, w) -> startRefresh()).show();
+                .setPositiveButton("开始刷新", (d, w) -> startRefresh(chargeSeconds)).show();
     }
 
-    private void startRefresh() {
+    private void startRefresh(int chargeSeconds) {
         if (busy || preparing || !resumed || prepared == null) return;
         if (!prepared.panelType.equals(panelType())) { render(); return; }
         final String id = Long.toString(SystemClock.elapsedRealtime());
@@ -605,8 +609,10 @@ public final class MainActivity extends Activity {
             job.put("imageFile", imageFile.getAbsolutePath());
             job.put("sha256", sha);
             job.put("officialCheck", officialCheck());
+            job.put("chargeMs", chargeSeconds * 1000);
             try (FileOutputStream out = new FileOutputStream(jobFile)) { out.write(job.toString().getBytes("UTF-8")); }
             append("图片参数：" + prepared.settings);
+            if (chargeSeconds > 0) append("发送前充能：" + chargeSeconds + " 秒");
         } catch (Exception e) {
             append("准备失败：" + e);
             imageFile.delete(); jobFile.delete();
@@ -739,6 +745,7 @@ public final class MainActivity extends Activity {
         if (parts.length != 3) return;
         String kind = parts[1], message = parts[2];
         if (kind.equals("START")) {
+            chargeTotalMs = 0;
             scanDeadline = SystemClock.elapsedRealtime() + SCAN_SECONDS * 1000L;
             state.setText("正在寻卡…");
             main.post(tick);
@@ -770,6 +777,10 @@ public final class MainActivity extends Activity {
                 || kind.equals("ERROR") || kind.equals("RESULT") || kind.equals("CANCELLED")) {
             terminalSeen = true;
         }
+        if (chargeTotalMs > 0 && (terminalSeen || kind.equals("END"))) {
+            main.removeCallbacks(tick);
+            chargeTotalMs = 0;
+        }
         if (kind.equals("END") && !terminalSeen && busy && !checkSession) {
             state.setText("没刷成 · 中途断了");
             detail.setText("这一轮没有走到刷新那一步就结束了（" + message + "）。"
@@ -786,6 +797,19 @@ public final class MainActivity extends Activity {
             String[] stage = message.split("\\|", 2);
             state.setText(stage.length == 2 ? stage[1] : message);
             detail.setText("保持贴合，别切换应用");
+        }
+        if (kind.equals("WAIT") && message.startsWith("charging|")) {
+            String[] fields = message.split("\\|", 3);
+            chargeStarted = Long.parseLong(fields[1]);
+            chargeTotalMs = Integer.parseInt(fields[2]);
+            progress.setMax(chargeTotalMs);
+            main.removeCallbacks(tick);
+            main.post(tick);
+        }
+        if (kind.equals("WAIT_DONE") && message.startsWith("charging|")) {
+            main.removeCallbacks(tick);
+            chargeTotalMs = 0;
+            progress.setProgress(0);
         }
         if (kind.equals("PROGRESS")) {
             String[] fields = message.split("\\|", 3);
@@ -835,8 +859,15 @@ public final class MainActivity extends Activity {
     private final Runnable tick = new Runnable() {
         @Override public void run() {
             if (!busy) return;
-            detail.setText("寻找墨水屏 · 最长还剩 "
-                    + Math.max(0, (scanDeadline - SystemClock.elapsedRealtime() + 999) / 1000) + " 秒 · 贴稳别动");
+            long now = SystemClock.elapsedRealtime();
+            if (chargeTotalMs > 0) {
+                int elapsed = (int) Math.min(chargeTotalMs, Math.max(0, now - chargeStarted));
+                progress.setProgress(elapsed);
+                detail.setText("发送前充能 · 还剩 " + (chargeTotalMs - elapsed + 999) / 1000 + " 秒 · 保持贴合");
+            } else {
+                detail.setText("寻找墨水屏 · 最长还剩 "
+                        + Math.max(0, (scanDeadline - now + 999) / 1000) + " 秒 · 贴稳别动");
+            }
             main.postDelayed(this, 250);
         }
     };
@@ -963,6 +994,11 @@ public final class MainActivity extends Activity {
         return getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean("officialCheck", false);
     }
 
+    private int chargeSeconds() {
+        int saved = getSharedPreferences(PREFS, MODE_PRIVATE).getInt("chargeSeconds", 0);
+        return Math.max(0, Math.min(PanelProtocol.MAX_CHARGE_MS / 1000, saved));
+    }
+
     private void showSettings() {
         LinearLayout body = new LinearLayout(this);
         body.setOrientation(LinearLayout.VERTICAL);
@@ -986,6 +1022,23 @@ public final class MainActivity extends Activity {
         });
         body.addView(panel, new LinearLayout.LayoutParams(-1, dp(44)));
         body.addView(text("D1 读不出屏型，请按实物选择。A0X 适用于左右半屏顺序相反的 A0 屏。", 11, 0xff68766e));
+
+        body.addView(text("发送前充能时间", 13, 0xff52635d));
+        Spinner charge = new Spinner(this);
+        String[] chargeOptions = new String[PanelProtocol.MAX_CHARGE_MS / 1000 + 1];
+        chargeOptions[0] = "0 秒（默认）";
+        for (int i = 1; i < chargeOptions.length; i++) chargeOptions[i] = i + " 秒";
+        charge.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, chargeOptions));
+        charge.setSelection(chargeSeconds());
+        charge.setEnabled(!busy);
+        charge.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            public void onItemSelected(AdapterView<?> p, View v, int pos, long id) {
+                getSharedPreferences(PREFS, MODE_PRIVATE).edit().putInt("chargeSeconds", pos).apply();
+            }
+            public void onNothingSelected(AdapterView<?> p) { }
+        });
+        body.addView(charge, new LinearLayout.LayoutParams(-1, dp(44)));
+        body.addView(text("连接屏幕后先保持贴合充能，再开始检查与传图。", 11, 0xff68766e));
 
         body.addView(text("上电等待固定 500 ms（官方值），无需设置。", 11, 0xff68766e));
 

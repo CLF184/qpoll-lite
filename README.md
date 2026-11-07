@@ -25,6 +25,7 @@
 - 预览从打包字节回读，所见即所发
 - 相册选图（ACTION_PICK），两机统一大缩略图体验
 - 设置页可选择 **A1（默认）、A0 或 A0X**。D1 无法识别实物屏型。A0X 来自 [QPollLab 的 A0X 实现](https://github.com/CLF184/huawei-nfc-eink-android-app) 和 [luzamm 的上游 PR](https://github.com/ZhaoGY-N/huawei-nfc-eink-android-app/pull/9)，用于 A0 左右半屏顺序相反的实物。预览和发送共用一次打包结果。
+- 设置页的「发送前充能时间」可选 0–30 秒，默认 0 秒。ISO-DEP 连接后先保持贴合充能，再执行 D1 检查与传图。充能期间可停止。
 
 Android 16 及以上使用已连接的 Shizuku 时，QTag 开启且前台 ReaderMode 注册后，会请求系统恢复已暂停的 NFC 轮询。可从日志中的 `POLLING_RESUME` 查看请求状态，通过「只读检查屏幕」确认能否实际读到 D1。
 
