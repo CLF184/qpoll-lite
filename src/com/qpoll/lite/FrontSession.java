@@ -152,6 +152,11 @@ public final class FrontSession {
     }
 
     private void begin(int scanSeconds) {
+        if (stopFile.exists()) {
+            signal("CANCELLED", "已停止，未启动寻卡");
+            finish("已停止");
+            return;
+        }
         if (!adapter.isEnabled()) {
             signal("ERROR", "NFC 关着，请先在系统设置里打开");
             finish("没开始");
@@ -182,8 +187,18 @@ public final class FrontSession {
             signal("QTAG_ON", "Q-Poll 开关已发出，返回 " + code
                     + (code == 0 ? "（接受）" : "（被拒，本轮可能找不到屏）"));
             try {
-                adapter.enableReaderMode(activity, this::onTag,
+                adapter.enableReaderMode(activity, tag -> main.post(() -> onTag(tag)),
                         READER_FLAGS, readerOptions());
+                // HyperOS 可在轮询暂停时接受 ReaderMode，却跳过寻卡配置。
+                // 先注册前台回调，再恢复轮询，使系统使用这一轮的 QTag + ReaderMode 配置。
+                if (code == 0 && ShizukuQtag.available()) {
+                    int status = ShizukuQtag.resumePolling();
+                    if (status == 1 || status == 2) {
+                        signal("POLLING_RESUME", status == 1 ? "系统接受恢复轮询" : "系统轮询已开启");
+                    } else {
+                        signal("POLLING_RESUME_FAILED", "未能通过 Shizuku 恢复轮询，状态=" + status);
+                    }
+                }
                 signal("READER_ON", "前台寻卡已开启（Q-Poll 场先行），等 " + scanSeconds + " 秒");
             } catch (Throwable e) {
                 signal("ERROR", "开前台寻卡失败：" + e);
@@ -316,6 +331,7 @@ public final class FrontSession {
         main.post(() -> {
             signal("END", reason);
             if (onDone != null) onDone.run();
+            if (!readerOn) return;
             /*
              * 1.4.8 收尾：按设备画像走两路（两路行为都有完整实测背书）。
              *

@@ -121,7 +121,7 @@ public final class MainActivity extends Activity {
      */
     private final Shizuku.UserServiceArgs bridgeArgs = new Shizuku.UserServiceArgs(
             new ComponentName("com.qpoll.lite", "com.qpoll.lite.ShellBridge"))
-            .tag("nfc-lite").version(61).daemon(false).processNameSuffix("nfc_shell");
+            .tag("nfc-lite").version(69).daemon(false).processNameSuffix("nfc_shell");
 
     private final ServiceConnection bridgeConnection = new ServiceConnection() {
         @Override public void onServiceConnected(ComponentName name, IBinder binder) {
@@ -429,14 +429,15 @@ public final class MainActivity extends Activity {
         final int token = ++revision;
         final int[] fitted = pixels;
         final int selected = mode;
-        final String panelType = panelType();
+        final String selectedPanel = panelType();
         preparing = true;
         detail.setText("正在出图…");
         new Thread(() -> {
             try {
-                final PanelImage.Prepared result = PanelImage.prepare(fitted, panelType, selected);
+                final PanelImage.Prepared result = PanelImage.prepare(fitted, selectedPanel, selected);
                 main.post(() -> {
                     if (token != revision || destroyed) return;
+                    if (!selectedPanel.equals(panelType())) { render(); return; }
                     prepared = result;
                     preview.setImage(result.preview);
                     preparing = false;
@@ -475,7 +476,10 @@ public final class MainActivity extends Activity {
     }
 
     private String panelType() {
-        return getSharedPreferences(PREFS, MODE_PRIVATE).getString("panelType", "A1");
+        android.content.SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        String type = prefs.getString("panelType", "A1");
+        // v1.4.35 exposed both selectors. Either could enable the A0 layout.
+        return "A1".equals(type) && prefs.getBoolean("panelA0", false) ? "A0" : type;
     }
 
     /**
@@ -579,7 +583,7 @@ public final class MainActivity extends Activity {
                 .setMessage("会替换屏上当前的画面。\n\n风格：" + prepared.settings
                         + "\n上电等待：" + PanelProtocol.POWER_MS + " ms（官方值）"
                         + "\n查电模式：" + (officialCheck() ? "官方（刷完才回）" : "快速（收到即回）")
-                        + "\n屏幕类型：" + (panelA0() ? "A0（行交错）" : "A1（默认行序）")
+                        + "\n屏幕类型：" + prepared.panelType
                         + "\n\n贴稳别动，全程保持本页在前台，直到提示结束。中途断开可能留下半张图。")
                 .setNegativeButton("再看看", null)
                 .setPositiveButton("开始刷新", (d, w) -> startRefresh()).show();
@@ -587,6 +591,7 @@ public final class MainActivity extends Activity {
 
     private void startRefresh() {
         if (busy || preparing || !resumed || prepared == null) return;
+        if (!prepared.panelType.equals(panelType())) { render(); return; }
         final String id = Long.toString(SystemClock.elapsedRealtime());
         final File sessionStop = new File(getFilesDir(), "stop-" + id);
         final File jobFile = new File(getFilesDir(), "job-" + id + ".json");
@@ -600,7 +605,6 @@ public final class MainActivity extends Activity {
             job.put("imageFile", imageFile.getAbsolutePath());
             job.put("sha256", sha);
             job.put("officialCheck", officialCheck());
-            job.put("panelA0", panelA0());
             try (FileOutputStream out = new FileOutputStream(jobFile)) { out.write(job.toString().getBytes("UTF-8")); }
             append("图片参数：" + prepared.settings);
         } catch (Exception e) {
@@ -644,8 +648,10 @@ public final class MainActivity extends Activity {
         // 1.3.5/1.3.6 的「Shizuku 后端优先」是把唯一能刷的路绕开了，撤掉。
         // runBridge 代码保留在文件里，等将来有绕过前台检查的合法手段再评估。
         new Thread(() -> {
+            if (android.os.Build.VERSION.SDK_INT >= 36) ensureQtagChannel();
             main.post(() -> {
                 if (destroyed) return;
+                if (sessionStop.exists()) { done.run(); return; }
                 append("寻卡后端：前台直连 + HAL 兼容层");
                 RootHook.ensureReady(this, line -> main.post(() -> append(line)), false);
                 state.setText("正在寻卡…");
@@ -957,36 +963,29 @@ public final class MainActivity extends Activity {
         return getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean("officialCheck", false);
     }
 
-    /**
-     * 屏幕实物变体：false = A1 常规行序（默认，我们两块验证屏都是）；
-     * true = A0 控制器行交错（打包后按 row→偶数位/倒序奇数位重排再发）。
-     * D1 读不出屏型；选错不会坏屏，画面会「隔列错乱 + 半边倒序」，改对重刷即可。
-     * A0 映射来自 ZhaoGY-N v2.10 的逐字节比对结论，未经我们实物验证——靠网友实测反馈。
-     */
-    private boolean panelA0() {
-        return getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean("panelA0", false);
-    }
-
     private void showSettings() {
         LinearLayout body = new LinearLayout(this);
         body.setOrientation(LinearLayout.VERTICAL);
         body.setPadding(dp(16), dp(8), dp(16), dp(8));
 
-        body.addView(text("屏幕类型（排线顺序）", 13, 0xff52635d));
+        body.addView(text("屏幕类型（实物变体）", 13, 0xff52635d));
         final Spinner panel = new Spinner(this);
+        String[] types = {"A1", "A0", "A0X"};
         panel.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item,
-                new String[]{"A1 · 常见（默认）", "A0 · 少见"}));
-        panel.setSelection("A0".equals(panelType()) ? 1 : 0);
+                new String[]{"A1 · 常规行序（默认）", "A0 · 交错行序", "A0X · A0 左右半屏互换"}));
+        panel.setSelection(java.util.Arrays.asList(types).indexOf(panelType()));
+        panel.setEnabled(!busy);
         panel.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             public void onItemSelected(AdapterView<?> p, View v, int pos, long id) {
+                if (types[pos].equals(panelType())) return;
                 getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-                        .putString("panelType", pos == 1 ? "A0" : "A1").apply();
+                        .putString("panelType", types[pos]).remove("panelA0").apply();
                 if (pixels != null && !busy && !preparing) render();
             }
             public void onNothingSelected(AdapterView<?> p) { }
         });
         body.addView(panel, new LinearLayout.LayoutParams(-1, dp(44)));
-        body.addView(text("改错了会刷出横向错位的图，A0 换 A1 重刷即可恢复。", 11, 0xff68766e));
+        body.addView(text("D1 读不出屏型，请按实物选择。A0X 适用于左右半屏顺序相反的 A0 屏。", 11, 0xff68766e));
 
         body.addView(text("上电等待固定 500 ms（官方值），无需设置。", 11, 0xff68766e));
 
@@ -1003,20 +1002,6 @@ public final class MainActivity extends Activity {
         });
         body.addView(checkMode, new LinearLayout.LayoutParams(-1, dp(44)));
         body.addView(text("官方查电模式贴合差时会如实报 68CA；贴合不稳就用快速模式。", 11, 0xff68766e));
-
-        body.addView(text("屏幕类型（实物变体）", 13, 0xff52635d));
-        final Spinner panelSel = new Spinner(this);
-        String[] panelLabels = {"A1（默认）· 常规行序——现有四色屏基本都是这类", "A0 · 交错行序——刷出隔列错乱画面说明屏是 A0"};
-        panelSel.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, panelLabels));
-        panelSel.setSelection(panelA0() ? 1 : 0);
-        panelSel.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
-            public void onItemSelected(AdapterView<?> p, View v, int pos, long id) {
-                getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean("panelA0", pos == 1).apply();
-            }
-            public void onNothingSelected(AdapterView<?> p) { }
-        });
-        body.addView(panelSel, new LinearLayout.LayoutParams(-1, dp(44)));
-        body.addView(text("D1 读不出屏型，只能按实物或卖家说明选。选错不会坏屏：画面会隔列错乱，改对重刷即可。", 11, 0xff68766e));
 
         final android.widget.CheckBox letterboxBox = new android.widget.CheckBox(this);
         letterboxBox.setText("完整显示（留白，不裁掉边缘）");
@@ -1104,7 +1089,9 @@ public final class MainActivity extends Activity {
         identityOk = false;
         qtagDenied = false;
         new Thread(() -> {
-            boolean ready = RootHook.ensureReady(this, line -> main.post(() -> append(line)), true);
+            if (android.os.Build.VERSION.SDK_INT >= 36) ensureQtagChannel();
+            boolean ready = !sessionStop.exists()
+                    && RootHook.ensureReady(this, line -> main.post(() -> append(line)), true);
             main.post(() -> {
                 hookReady = ready;
                 if (destroyed) return;
