@@ -14,8 +14,11 @@ public final class PanelSession {
     public interface Events {void emit(String kind,String message);}
     public static void run(Tag tag,String mode,File jobFile,File stopFile,Events events) throws Exception {
         byte[] config=read(jobFile,8192);JSONObject job=new JSONObject(new String(config,"UTF-8"));
+        final boolean refresh=mode.equals("refresh");
+        final int chargeMs=refresh?job.optInt("chargeMs",0):0;
+        if(chargeMs<0||chargeMs>PanelProtocol.MAX_CHARGE_MS)throw new IllegalArgumentException("发送前充能时间必须为 0–30 秒");
         byte[] image=null;
-        if(mode.equals("refresh")) {
+        if(refresh) {
             PanelType type=PanelType.parse(job.optString("panelType",""));
             events.emit("PANEL_TYPE","用户选择="+type+"；D1 不识别实体屏幕型号；保留板内驱动");
             File data=new File(job.getString("imageFile")).getCanonicalFile();
@@ -26,7 +29,7 @@ public final class PanelSession {
         }
         // 刷新模式的总预算：传图约 17 秒，刷完再供能最多 20+90 秒，加起来 ~130 秒，
         // 留到 240 秒是为了别让总预算在半路把供能掐断（一掐断图就废了）。
-        final long deadline=SystemClock.elapsedRealtime()+(mode.equals("refresh")?240000:15000);
+        final long deadline=SystemClock.elapsedRealtime()+(refresh?240000+chargeMs:15000);
         PanelProtocol.Control control=new PanelProtocol.Control() {
             public long now(){return SystemClock.elapsedRealtime();}
             public void sleep(long ms)throws Exception{Thread.sleep(ms);}
@@ -60,11 +63,7 @@ public final class PanelSession {
             // 区别只在结论文案，协议层不要写图——probe 根本没有图，走 write 会空指针。
             if(mode.equals("identity")||mode.equals("probe"))protocol.identify();
             else {
-                if(job.optBoolean("panelA0",false)) {
-                    image=PanelProtocol.mapA0Rows(image);
-                    events.emit("PANEL_A0","屏幕类型=A0：控制器行交错重排已应用（A1 屏误选会隔列错乱，改回重刷即可）");
-                }
-                protocol.write(image,job.optBoolean("officialCheck",false));
+                protocol.write(image,job.optBoolean("officialCheck",false),chargeMs);
             }
         } finally {try{iso.close();}catch(Exception e){events.emit("CLOSE_ERROR","关闭 ISO-DEP："+e);}}
     }

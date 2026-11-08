@@ -17,12 +17,14 @@ import org.json.JSONObject;
 /**
  * Shizuku 用户服务：跑在 shell（或 root）身份下，负责起 NFC worker 并把它的输出搬回 App。
  *
- * <p>接口用裸 Binder 手写，只有四条：
+ * <p>接口用裸 Binder 手写：
  * <ol>
  *   <li>1 = 开始一轮会话（mode / 秒数 / job JSON / 图片字节 / 用于取消的回调 Binder）</li>
  *   <li>2 = 取增量日志（App 每 100ms 拉一次，顺带知道还在不在跑）</li>
  *   <li>3 = 取消</li>
  *   <li>4 = 报自己的 UID（App 用它判断是 Shell 还是 Root 权限）</li>
+ *   <li>5 = 设置 QTag 开关</li>
+ *   <li>6 = 恢复已暂停的 NFC 轮询</li>
  * </ol>
  */
 public final class ShellBridge extends Binder {
@@ -83,7 +85,7 @@ public final class ShellBridge extends Binder {
             }, "nfc-destroy").start();
             return true;
         }
-        if (code < 1 || code > 5) return super.onTransact(code, data, reply, flags);
+        if (code < 1 || code > 6) return super.onTransact(code, data, reply, flags);
         if (Binder.getCallingUid() != appUid) throw new SecurityException("Wrong caller");
         data.enforceInterface(INTERFACE);
         if (code == 4) { reply.writeNoException(); reply.writeInt(android.os.Process.myUid()); return true; }
@@ -95,6 +97,21 @@ public final class ShellBridge extends Binder {
             reply.writeNoException();
             try { reply.writeInt(qtag(action)); }
             catch (Throwable e) { log("QP|QTAG_SHELL_ERROR|" + e); reply.writeInt(-1); }
+            return true;
+        }
+        if (code == 6) {
+            int status;
+            try {
+                Object service = nfcService();
+                Object result = nfcType.getMethod("resumePolling").invoke(service);
+                // 较旧的接口无返回值，新接口返回原始状态码。
+                status = result instanceof Integer ? (Integer) result : 1;
+            } catch (Exception e) {
+                android.util.Log.w("QPollLite", "Shizuku resumePolling failed", e);
+                status = -1;
+            }
+            reply.writeNoException();
+            reply.writeInt(status);
             return true;
         }
         if (code == 1) {
@@ -143,8 +160,7 @@ public final class ShellBridge extends Binder {
     private Object nfcService;
     private Class<?> nfcType;
 
-    /** 在 shell 身份下调用 NXP 私有的 Q-Poll 开关；返回 NFC 服务的原始返回值，0 = 接受。 */
-    private int qtag(int action) throws Exception {
+    private synchronized Object nfcService() throws Exception {
         if (nfcService == null) {
             Object binder = Class.forName("android.os.ServiceManager")
                     .getMethod("getService", String.class).invoke(null, "nfc");
@@ -153,9 +169,15 @@ public final class ShellBridge extends Binder {
             nfcService = Class.forName("android.nfc.INfcAdapter$Stub")
                     .getMethod("asInterface", IBinder.class).invoke(null, binder);
         }
+        return nfcService;
+    }
+
+    /** 在 shell 身份下调用 NXP 私有的 Q-Poll 开关；返回 NFC 服务的原始返回值，0 = 接受。 */
+    private int qtag(int action) throws Exception {
+        Object service = nfcService();
         java.lang.reflect.Method method = nfcType.getMethod("sendVendorNciMessage",
                 int.class, int.class, int.class, byte[].class);
-        Object result = method.invoke(nfcService, 1, 15, 112, new byte[]{0x31, (byte) action});
+        Object result = method.invoke(service, 1, 15, 112, new byte[]{0x31, (byte) action});
         return result instanceof Integer ? (Integer) result : -1;
     }
 

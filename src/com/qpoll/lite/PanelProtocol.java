@@ -10,6 +10,7 @@ import java.util.Map;
  * PolyForm Noncommercial 1.0.0; see bundled licenses/kur0neko-LICENSE.txt. */
 public final class PanelProtocol {
     public static final int WIDTH=552, HEIGHT=768, IMAGE_BYTES=105984;
+    public static final int MAX_CHARGE_MS=30000;
     public static final int DEFAULT_POLL_MS=500;
     /**
      * D4 之后继续供能的秒数。
@@ -333,7 +334,11 @@ public final class PanelProtocol {
      */
     public static final int POWER_MS = 500;
     public boolean write(byte[] packed,boolean officialCheck) throws Exception {
+        return write(packed,officialCheck,0);
+    }
+    public boolean write(byte[] packed,boolean officialCheck,int chargeMs) throws Exception {
         if(packed.length!=IMAGE_BYTES)throw new IllegalArgumentException("图像必须为 105984 字节");
+        if(chargeMs<0||chargeMs>MAX_CHARGE_MS)throw new IllegalArgumentException("发送前充能时间必须为 0–30 秒");
         /*
          * 0x00 蓄能实验已结案（10-31 晚，K90 实测）：0x00 模式上电等待 2000ms vs 500ms，
          * D4 阻塞 4.28s vs 2.55s——多出的 1.5s 全部是干等，自检失败耗时不变（约 2s），照样 68CA。
@@ -344,6 +349,12 @@ public final class PanelProtocol {
         byte[] refresh=d4(POWER_MS,officialCheck); // Validate every option before any authentication/write.
         control.event("TIMING","上电等待="+POWER_MS+" ms（官方值）；查电模式="
                 +(officialCheck?"官方（屏查电，刷完才回）":"快速（收到即回，配合保场 20 秒）"));
+        if(chargeMs>0){
+            control.event("STAGE","charging|发送前充能，请保持贴合");
+            control.event("WAIT","charging|"+control.now()+"|"+chargeMs);
+            pause(chargeMs);
+            control.event("WAIT_DONE","charging|"+chargeMs);
+        }
         Info initial=identify();
         packed=PanelType.forScan(packed,initial.topDown());
         control.event("SCAN","采用板内扫描方向="+(initial.topDown()?"01（从上到下）":"00（从下到上）")+"；不改写驱动配置");

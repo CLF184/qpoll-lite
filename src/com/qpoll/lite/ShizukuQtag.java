@@ -42,14 +42,22 @@ final class ShizukuQtag {
 
     /** @return NFC 服务的原始返回值（0 = 接受）；{@link #UNAVAILABLE} 表示这条通道用不了。 */
     static int send(int action) {
+        return transact(5, action);
+    }
+
+    static int resumePolling() {
+        return transact(6);
+    }
+
+    private static int transact(int code, int... args) {
         IBinder binder = bridge;
         if (binder == null || !binder.isBinderAlive()) return UNAVAILABLE;
         Parcel data = Parcel.obtain();
         Parcel reply = Parcel.obtain();
         try {
             data.writeInterfaceToken(INTERFACE);
-            data.writeInt(action);
-            binder.transact(5, data, reply, 0);
+            for (int arg : args) data.writeInt(arg);
+            if (!binder.transact(code, data, reply, 0)) return UNAVAILABLE;
             reply.readException();
             return reply.readInt();
         } catch (Throwable e) {
