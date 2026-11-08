@@ -13,7 +13,7 @@ import java.lang.reflect.Method;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * 前台直连会话：不起独立进程、不经过 Shizuku，整条链路都在 App 自己的进程里跑。
+ * 前台直连会话：ReaderMode 和 APDU 由 App 负责，ST54L 的射频配置由 Root 辅助进程管理。
  *
  * <p><b>为什么必须在前台</b>：部分 ROM（实测 Redmi Note 12T Pro 的 HyperOS）会对
  * 「非前台调用方」发出的 reader-mode 请求<b>静默拒绝</b>——不报错、不抛异常，
@@ -65,6 +65,9 @@ public final class FrontSession {
     private final AtomicBoolean finished = new AtomicBoolean();
     private volatile boolean readerOn;
     private volatile Thread runner;
+    private St54lSession st54l;
+    private boolean stExited, stPanelRunning;
+    private String stEndReason;
     /** 最近一次有动静的时间与阶段，静默看门狗靠它判断是不是卡死了。 */
     private volatile long lastSignal = System.currentTimeMillis();
     private volatile String lastKind = "";
@@ -86,7 +89,7 @@ public final class FrontSession {
      * @param scanSeconds 等标签的秒数，超时即结束
      */
     public static void start(Activity activity, String mode, File jobFile, File stopFile,
-                             int scanSeconds, Events events, Runnable onDone) {
+                             int scanSeconds, int rfDelta, Events events, Runnable onDone) {
         NfcAdapter adapter = NfcAdapter.getDefaultAdapter(activity);
         if (adapter == null) {
             events.emit("ERROR", "这台机器没有 NFC 硬件");
@@ -99,7 +102,7 @@ public final class FrontSession {
         //   发现配置 = 单项 71 → 必成；= 6 项混合（71+常规轮询）→ 必败。
         // 挪屏之所以有效，是它触发了把发现收窄成单项 71 的重配。
         // App 侧主动做这件事：enableReaderMode 之后调 updateDiscoveryTechnology(0x71)。
-        s.main.post(() -> s.begin(scanSeconds));
+        s.main.post(() -> s.begin(scanSeconds, rfDelta));
     }
 
     /**
@@ -151,7 +154,7 @@ public final class FrontSession {
         }
     }
 
-    private void begin(int scanSeconds) {
+    private void begin(int scanSeconds, int rfDelta) {
         if (stopFile.exists()) {
             signal("CANCELLED", "已停止，未启动寻卡");
             finish("已停止");
@@ -160,6 +163,10 @@ public final class FrontSession {
         if (!adapter.isEnabled()) {
             signal("ERROR", "NFC 关着，请先在系统设置里打开");
             finish("没开始");
+            return;
+        }
+        if (St54lSession.supported()) {
+            beginSt54l(scanSeconds, rfDelta);
             return;
         }
         signal("START", mode + ":" + scanSeconds);
@@ -226,10 +233,50 @@ public final class FrontSession {
                     + (code == 0 ? "（接受）" : "（被拒，本轮可能找不到屏）"));
             narrowDiscoveryToQPoll();
         }
+        awaitTag(scanSeconds, scanSeconds + " 秒内没收到标签。要么没贴到线圈上，"
+                + "要么这台机器还得靠 Shizuku（不用 root）或 root 兼容层才发得出 Q-Poll。");
+    }
+
+    private void beginSt54l(int scanSeconds, int rfDelta) {
+        st54l = new St54lSession();
+        signal("STAGE", "st54l|等待 Root 并准备 ST54L 寻卡");
+        st54l.start(activity, mode, stopFile, rfDelta, (kind, message) -> activity.runOnUiThread(() -> {
+            if ("RECOVERY_FAILED".equals(kind)) signal("RESTORE_FAILED", message);
+            else if ("ERROR".equals(kind) || "RESTORE_FAILED".equals(kind)) signal(kind, message);
+            else events.emit("ST54L_" + kind, message);
+            if (!"READY".equals(kind) || finished.get()) return;
+            if (stopFile.exists() || activity.isDestroyed()) {
+                signal("CANCELLED", "已停止，等待 ST54L 恢复配置");
+                finish("已停止");
+                return;
+            }
+            try {
+                readerOn = true;
+                android.os.Bundle options = new android.os.Bundle();
+                options.putInt(NfcAdapter.EXTRA_READER_PRESENCE_CHECK_DELAY, 250);
+                adapter.enableReaderMode(activity, tag -> main.post(() -> onTag(tag)), READER_FLAGS, options);
+                signal("START", mode + ":" + scanSeconds);
+                signal("READER_ON", "ST54L 7A 寻卡已开启，等 " + scanSeconds + " 秒");
+                awaitTag(scanSeconds, scanSeconds + " 秒内没收到标签；ST54L 7A 配置已读回确认，请保持贴合。");
+            } catch (Throwable error) {
+                signal("ERROR", "开 ST54L 前台寻卡失败：" + error);
+                finish("没开始");
+            }
+        }), status -> activity.runOnUiThread(() -> {
+            stExited = true;
+            if (status != 0) events.emit("ST54L_EXIT", "ST54L 辅助进程返回 " + status + "，请查看配置恢复日志");
+            if (!finished.get()) {
+                if (stPanelRunning) requestStop();
+                finish("ST54L 辅助进程结束");
+            }
+            completeSt54l();
+        }));
+    }
+
+    private void awaitTag(int scanSeconds, String failure) {
         main.postDelayed(() -> {
             if (finished.get()) return;
-            signal("RESULT", scanSeconds + " 秒内没收到标签。要么没贴到线圈上，"
-                    + "要么这台机器还得靠 Shizuku（不用 root）或 root 兼容层才发得出 Q-Poll。");
+            signal("RESULT", failure);
             finish("没找到屏幕");
         }, scanSeconds * 1000L);
     }
@@ -258,22 +305,34 @@ public final class FrontSession {
         StringBuilder uid = new StringBuilder();
         for (byte b : tag.getId()) uid.append(String.format("%02X", b & 255));
         signal("TAG", "收到标签 UID=" + uid);
+        if (st54l != null) stPanelRunning = true;
         runner = new Thread(() -> {
             try {
                 // PanelSession 跑在后台线程，但它发事件时会直接去改界面控件。
                 // 必须转回主线程，否则抛 CalledFromWrongThreadException（实测会打断传图）。
                 PanelSession.run(tag, mode, jobFile, stopFile,
-                        (kind, message) -> main.post(() -> signal(kind, message)));
-                if (mode.equals("identity")) main.post(() -> signal("RESULT", "D1 屏幕规格校验通过，未写图像"));
+                        this::panelEvent);
+                if (mode.equals("identity")) panelEvent("RESULT", "D1 屏幕规格校验通过，未写图像");
+            } catch (InterruptedException e) {
+                panelEvent("CANCELLED", e.getMessage());
             } catch (Throwable e) {
-                main.post(() -> signal("ERROR", e.getClass().getSimpleName() + ": " + e.getMessage()));
+                panelEvent("ERROR", e.getClass().getSimpleName() + ": " + e.getMessage());
             } finally {
-                finish("本轮结束");
+                if (st54l == null) finish("本轮结束");
+                else activity.runOnUiThread(() -> {
+                    stPanelRunning = false;
+                    finish("本轮结束");
+                    completeSt54l();
+                });
             }
         }, "front-panel");
         runner.start();
         // 看门狗必须在 removeCallbacksAndMessages 之后再挂，否则会被一起撤掉。
         main.postDelayed(watchdog, 3000);
+    }
+
+    private void panelEvent(String kind, String message) {
+        activity.runOnUiThread(() -> signal(kind, message));
     }
 
     /**
@@ -329,6 +388,17 @@ public final class FrontSession {
         main.removeCallbacksAndMessages(null);
         // 收尾可能从 PanelSession 的后台线程进来，UI 动作必须切回主线程。
         main.post(() -> {
+            if (st54l != null) {
+                stEndReason = reason;
+                if (stPanelRunning) requestStop();
+                if (readerOn) {
+                    try { adapter.disableReaderMode(activity); }
+                    catch (Exception error) { signal("ERROR", "释放 ST54L ReaderMode 失败：" + error); }
+                }
+                st54l.stop();
+                completeSt54l();
+                return;
+            }
             signal("END", reason);
             if (onDone != null) onDone.run();
             if (!readerOn) return;
@@ -357,6 +427,13 @@ public final class FrontSession {
         });
     }
 
+    private void completeSt54l() {
+        if (!stExited || stPanelRunning || stEndReason == null) return;
+        signal("END", stEndReason);
+        stEndReason = null;
+        if (onDone != null) onDone.run();
+    }
+
     /** 空闲期（不在刷图）屏被 reader 轮询发现的次数，只作诊断计数，不打印。 */
     private static volatile int idleTags;
 
@@ -373,6 +450,7 @@ public final class FrontSession {
         try {
             NfcAdapter.getDefaultAdapter(activity).disableReaderMode(activity);
         } catch (Throwable ignored) { }
+        if (St54lSession.supported()) return;
         // 关 Q-Poll 开关：sendVendorNciMessage(1,15,112,{0x31,0})
         try {
             Class<?> manager = Class.forName("android.os.ServiceManager");

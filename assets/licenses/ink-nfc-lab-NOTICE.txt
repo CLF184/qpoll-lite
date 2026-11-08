@@ -1,0 +1,8 @@
+Protocol definitions and the D1 device-information parsing are adapted from:
+https://gitee.com/kur0neko/huawei-epd-pn532
+Required Notice: Copyright (c) 2026 kur0neko
+Upstream license: PolyForm Noncommercial 1.0.0
+https://polyformproject.org/licenses/noncommercial/1.0.0/
+
+Frida 17.24.0 Android arm64 injector is bundled under the wxWindows Library Licence.
+See assets/FRIDA-COPYING.txt and assets/NOTICE.txt for attribution and checksum.

@@ -7,6 +7,7 @@
 用法：ANDROID_HOME=... JAVA_HOME=... python build-win.py
 """
 import hashlib
+import lzma
 import os
 from pathlib import Path
 import subprocess
@@ -19,6 +20,10 @@ sdk = Path(os.environ["ANDROID_HOME"])
 jdk = Path(os.environ["JAVA_HOME"])
 bt = sdk / "build-tools/34.0.0"
 android = sdk / "platforms/android-34/android.jar"
+frida_archive = root / "third-party" / "frida-inject-17.24.0-android-arm64.xz"
+frida_xz = frida_archive.read_bytes()
+if hashlib.sha256(frida_xz).hexdigest() != "261875c11ec37fa1d3c26c05f71c0390ef1176539b0545d0b253cdbf24ece0e5":
+    raise RuntimeError("Frida Android ARM64 archive SHA-256 mismatch")
 build_root = root / "build"
 build_root.mkdir(parents=True, exist_ok=True)
 build = Path(tempfile.mkdtemp(prefix="lite-", dir=build_root))
@@ -51,6 +56,7 @@ run(bt / "aapt.exe", "package", "-f", "-M", root / "AndroidManifest.xml", "-S", 
     "-A", root / "assets", "-I", android, "-F", build / "unsigned.apk")
 with zipfile.ZipFile(build / "unsigned.apk", "a", zipfile.ZIP_DEFLATED) as archive:
     archive.write(build / "dex/classes.dex", "classes.dex")
+    archive.writestr("assets/frida-inject", lzma.decompress(frida_xz))
 run(bt / "zipalign.exe", "-f", "4", build / "unsigned.apk", build / "aligned.apk")
 key = build_root / "debug.keystore"
 if not key.exists():

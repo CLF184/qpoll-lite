@@ -94,6 +94,9 @@ public final class MainActivity extends Activity {
     private long scanDeadline;
     private long chargeStarted;
     private int chargeTotalMs;
+    private int stApcIndex;
+    private static final int[] ST_APC_DELTAS = {0, -1, 1, 2};
+    private static final String[] ST_APC_LABELS = {"原厂（默认）", "APC -1", "APC +1", "APC +2"};
 
     private volatile IBinder bridgeBinder;
     private int bridgeUid = -1;
@@ -123,7 +126,7 @@ public final class MainActivity extends Activity {
      */
     private final Shizuku.UserServiceArgs bridgeArgs = new Shizuku.UserServiceArgs(
             new ComponentName("com.qpoll.lite", "com.qpoll.lite.ShellBridge"))
-            .tag("nfc-lite").version(70).daemon(false).processNameSuffix("nfc_shell");
+            .tag("nfc-lite").version(72).daemon(false).processNameSuffix("nfc_shell");
 
     private final ServiceConnection bridgeConnection = new ServiceConnection() {
         @Override public void onServiceConnected(ComponentName name, IBinder binder) {
@@ -255,7 +258,7 @@ public final class MainActivity extends Activity {
         highlightStyle();
         append("就绪 · 四档风格：鎏金 / 质感 / 色阶 / 水墨（墨小佳官方算法）");
         restoreLastImage();
-        autoConnect();
+        if (!St54lSession.supported()) autoConnect();
     }
 
     // ───────────────────────── 权限 ─────────────────────────
@@ -327,7 +330,7 @@ public final class MainActivity extends Activity {
         // 12T Pro 那种不装 Shizuku 的机器，按钮照旧是「发送到墨水屏」。
         boolean needGrant = false;
         try {
-            needGrant = Shizuku.pingBinder()
+            needGrant = !St54lSession.supported() && Shizuku.pingBinder()
                     && Shizuku.checkSelfPermission() != android.content.pm.PackageManager.PERMISSION_GRANTED;
         } catch (Throwable ignored) { }
         send.setText(needGrant ? "连接 Shizuku 授权" : "发送到墨水屏");
@@ -573,7 +576,7 @@ public final class MainActivity extends Activity {
         // 发送前只处理一种情况：Shizuku 开着但没授权。
         // 没装/没开 Shizuku 的机器直接往下走（Android 15 及以下 App 自己能发 Q-Poll）。
         try {
-            if (Shizuku.pingBinder()
+            if (!St54lSession.supported() && Shizuku.pingBinder()
                     && Shizuku.checkSelfPermission() != android.content.pm.PackageManager.PERMISSION_GRANTED) {
                 connectShizuku();
                 return;
@@ -581,21 +584,27 @@ public final class MainActivity extends Activity {
         } catch (Throwable ignored) { }
         if (prepared == null) { Toast.makeText(this, "还没有图，先选一张", Toast.LENGTH_SHORT).show(); return; }
         final int chargeSeconds = chargeSeconds();
+        final boolean officialCheck = officialCheck();
+        final int holdSeconds = holdSeconds();
         new AlertDialog.Builder(this)
                 .setTitle("写入这块墨水屏？")
                 .setMessage("会替换屏上当前的画面。\n\n风格：" + prepared.settings
                         + "\n发送前充能：" + chargeSeconds + " 秒"
+                        + (St54lSession.supported() ? "\nST54L APC 实验档：" + ST_APC_LABELS[stApcIndex] : "")
                         + "\n上电等待：" + PanelProtocol.POWER_MS + " ms（官方值）"
-                        + "\n查电模式：" + (officialCheck() ? "官方（刷完才回）" : "快速（收到即回）")
+                        + "\n查电模式：" + (officialCheck ? "官方（刷完才回）" : "快速（收到即回）")
+                        + (officialCheck ? "" : "\n刷新后供能：" + holdSeconds + " 秒")
                         + "\n屏幕类型：" + prepared.panelType
                         + "\n\n贴稳别动，全程保持本页在前台，直到提示结束。中途断开可能留下半张图。")
                 .setNegativeButton("再看看", null)
-                .setPositiveButton("开始刷新", (d, w) -> startRefresh(chargeSeconds)).show();
+                .setPositiveButton("开始刷新", (d, w) -> startRefresh(chargeSeconds, officialCheck, holdSeconds)).show();
     }
 
-    private void startRefresh(int chargeSeconds) {
+    private void startRefresh(int chargeSeconds, boolean officialCheck, int holdSeconds) {
         if (busy || preparing || !resumed || prepared == null) return;
         if (!prepared.panelType.equals(panelType())) { render(); return; }
+        final boolean st54l = St54lSession.supported();
+        final int rfDelta = st54l ? ST_APC_DELTAS[stApcIndex] : 0;
         final String id = Long.toString(SystemClock.elapsedRealtime());
         final File sessionStop = new File(getFilesDir(), "stop-" + id);
         final File jobFile = new File(getFilesDir(), "job-" + id + ".json");
@@ -608,8 +617,9 @@ public final class MainActivity extends Activity {
             job.put("panelType", prepared.panelType);
             job.put("imageFile", imageFile.getAbsolutePath());
             job.put("sha256", sha);
-            job.put("officialCheck", officialCheck());
+            job.put("officialCheck", officialCheck);
             job.put("chargeMs", chargeSeconds * 1000);
+            job.put("holdSeconds", holdSeconds);
             try (FileOutputStream out = new FileOutputStream(jobFile)) { out.write(job.toString().getBytes("UTF-8")); }
             append("图片参数：" + prepared.settings);
             if (chargeSeconds > 0) append("发送前充能：" + chargeSeconds + " 秒");
@@ -637,7 +647,7 @@ public final class MainActivity extends Activity {
         final Runnable done = () -> {
             sessionStop.delete(); jobFile.delete(); imageFile.delete();
             busy = false;
-            new Thread(RootHook::releaseLease, "hook-release").start();
+            if (!st54l) new Thread(RootHook::releaseLease, "hook-release").start();
             if (!destroyed) {
                 getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
                 progress.setVisibility(View.GONE);
@@ -654,15 +664,15 @@ public final class MainActivity extends Activity {
         // 1.3.5/1.3.6 的「Shizuku 后端优先」是把唯一能刷的路绕开了，撤掉。
         // runBridge 代码保留在文件里，等将来有绕过前台检查的合法手段再评估。
         new Thread(() -> {
-            if (android.os.Build.VERSION.SDK_INT >= 36) ensureQtagChannel();
+            if (!st54l && android.os.Build.VERSION.SDK_INT >= 36) ensureQtagChannel();
             main.post(() -> {
                 if (destroyed) return;
                 if (sessionStop.exists()) { done.run(); return; }
-                append("寻卡后端：前台直连 + HAL 兼容层");
-                RootHook.ensureReady(this, line -> main.post(() -> append(line)), false);
+                append(st54l ? "寻卡后端：前台直连 + ST54L Root 7A" : "寻卡后端：前台直连 + HAL 兼容层");
+                if (!st54l) RootHook.ensureReady(this, line -> main.post(() -> append(line)), false);
                 state.setText("正在寻卡…");
                 detail.setText("把手机贴到线圈上，保持不动");
-                FrontSession.start(this, "refresh", jobFile, sessionStop, SCAN_SECONDS,
+                FrontSession.start(this, "refresh", jobFile, sessionStop, SCAN_SECONDS, rfDelta,
                         (kind, message) -> event("QP|" + kind + "|" + message), done);
             });
         }, "session-prepare").start();
@@ -689,7 +699,7 @@ public final class MainActivity extends Activity {
         boolean cancelSent = false, ended = false;
         try {
             boolean running = true;
-            long deadline = SystemClock.elapsedRealtime() + 335000;
+            long deadline = SystemClock.elapsedRealtime() + 375000;
             while (running) {
                 if (stop.exists() && !cancelSent) { cancelBridge(); cancelSent = true; }
                 request = Parcel.obtain(); reply = Parcel.obtain();
@@ -773,7 +783,7 @@ public final class MainActivity extends Activity {
             detail.setText("跟屏幕的连接断了——通常是屏被挪动、或者贴合松了。这张图没写进去，"
                     + "重新贴稳再刷一次就行（不用重启 NFC）。");
         }
-        if (kind.equals("REFRESH_DONE") || kind.equals("REFRESH_UNCONFIRMED")
+        if (kind.equals("REFRESH_DONE") || kind.equals("REFRESH_UNCONFIRMED") || kind.equals("HOLD_DONE")
                 || kind.equals("ERROR") || kind.equals("RESULT") || kind.equals("CANCELLED")) {
             terminalSeen = true;
         }
@@ -825,12 +835,10 @@ public final class MainActivity extends Activity {
             main.removeCallbacks(tick);
             state.setText("正在刷新屏幕");
             detail.setText(message);
-            // 保场这十几秒一旦被「停止」打断，NFC 场消失，屏掉电，本次刷新直接作废。
-            // 所以这段时间把停止按钮锁死，视觉上也说清楚。
-            if (stopButton != null) {
-                stopButton.setEnabled(false);
-                stopButton.setText("刷新供能中，请勿停止");
-            }
+        }
+        if (kind.equals("HOLD_DONE")) {
+            state.setText("请确认屏幕画面");
+            detail.setText(message);
         }
         if (kind.equals("REFRESH_DONE") || kind.equals("REFRESH_UNCONFIRMED")) {
             boolean done = kind.equals("REFRESH_DONE");
@@ -908,6 +916,13 @@ public final class MainActivity extends Activity {
      * 判决依据只有两个：屏有没有应答（tagSeen）、兼容层是不是真就绪（hookReady）。
      */
     private void showVerdict() {
+        if (St54lSession.supported()) {
+            state.setText(identityOk ? "ST54L 只读检查通过" : "ST54L 只读检查未通过");
+            detail.setText(identityOk ? "已收到标签并读到 D1 屏幕信息。"
+                    : tagSeen ? "已发现标签，D1 读取失败。请查看本轮日志。"
+                    : "未收到标签。请查看本轮 ST54L 配置和兼容注入日志。");
+            return;
+        }
         boolean nxp = ChipInfo.looksLikeNxp();
         if (tagSeen && identityOk) {
             state.setText("这台能刷");
@@ -986,7 +1001,7 @@ public final class MainActivity extends Activity {
     // ───────────────────────── 设置 ─────────────────────────
 
     /**
-     * D4 第 4 字节查电模式：false = 0x80 收到即回（现状，配合 20 秒保场）；
+     * D4 第 4 字节查电模式：false = 0x80 收到即回（配合可调的刷新后供能）；
      * true = 0x00 官方查电（屏刷完才回，省约 4 秒，保场由屏自己兜）。
      * 10-31 定案：贴合差时 0x00 会如实报 68CA——贴合好才建议开。
      */
@@ -997,6 +1012,11 @@ public final class MainActivity extends Activity {
     private int chargeSeconds() {
         int saved = getSharedPreferences(PREFS, MODE_PRIVATE).getInt("chargeSeconds", 0);
         return Math.max(0, Math.min(PanelProtocol.MAX_CHARGE_MS / 1000, saved));
+    }
+
+    private int holdSeconds() {
+        int saved = getSharedPreferences(PREFS, MODE_PRIVATE).getInt("holdSeconds", PanelProtocol.DEFAULT_HOLD_SECONDS);
+        return Math.max(0, Math.min(PanelProtocol.MAX_HOLD_SECONDS, saved));
     }
 
     private void showSettings() {
@@ -1040,21 +1060,54 @@ public final class MainActivity extends Activity {
         body.addView(charge, new LinearLayout.LayoutParams(-1, dp(44)));
         body.addView(text("连接屏幕后先保持贴合充能，再开始检查与传图。", 11, 0xff68766e));
 
+        if (St54lSession.supported()) {
+            body.addView(text("ST54L APC 实验档", 13, 0xff52635d));
+            Spinner apc = new Spinner(this);
+            apc.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, ST_APC_LABELS));
+            apc.setSelection(stApcIndex);
+            apc.setEnabled(!busy);
+            apc.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+                public void onItemSelected(AdapterView<?> p, View v, int pos, long id) { stApcIndex = pos; }
+                public void onNothingSelected(AdapterView<?> p) { }
+            });
+            body.addView(apc, new LinearLayout.LayoutParams(-1, dp(44)));
+            body.addView(text("仅在兼容性自检或刷新时应用，结束后恢复原始参数。", 11, 0xff68766e));
+        }
+
         body.addView(text("上电等待固定 500 ms（官方值），无需设置。", 11, 0xff68766e));
 
         body.addView(text("上电查电模式", 13, 0xff52635d));
         final Spinner checkMode = new Spinner(this);
-        String[] checkLabels = {"快速（默认）· 屏收到就回，App 保场 20 秒", "官方查电 · 屏刷完才回，省约 4 秒（屏自己兜保电）"};
+        final Spinner hold = new Spinner(this);
+        String[] checkLabels = {"快速（默认）· 屏收到就回，App 继续供能", "官方查电 · 屏刷完才回，省约 4 秒（屏自己兜保电）"};
         checkMode.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, checkLabels));
         checkMode.setSelection(officialCheck() ? 1 : 0);
         checkMode.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             public void onItemSelected(AdapterView<?> p, View v, int pos, long id) {
                 getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean("officialCheck", pos == 1).apply();
+                hold.setEnabled(!busy && pos == 0);
             }
             public void onNothingSelected(AdapterView<?> p) { }
         });
         body.addView(checkMode, new LinearLayout.LayoutParams(-1, dp(44)));
         body.addView(text("官方查电模式贴合差时会如实报 68CA；贴合不稳就用快速模式。", 11, 0xff68766e));
+
+        body.addView(text("刷新后供能时间（快速模式）", 13, 0xff52635d));
+        String[] holdOptions = new String[PanelProtocol.MAX_HOLD_SECONDS + 1];
+        for (int i = 0; i < holdOptions.length; i++) holdOptions[i] = i + " 秒";
+        holdOptions[0] = "0 秒（跳过）";
+        holdOptions[PanelProtocol.DEFAULT_HOLD_SECONDS] += "（默认）";
+        hold.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, holdOptions));
+        hold.setSelection(holdSeconds());
+        hold.setEnabled(!busy && !officialCheck());
+        hold.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            public void onItemSelected(AdapterView<?> p, View v, int pos, long id) {
+                getSharedPreferences(PREFS, MODE_PRIVATE).edit().putInt("holdSeconds", pos).apply();
+            }
+            public void onNothingSelected(AdapterView<?> p) { }
+        });
+        body.addView(hold, new LinearLayout.LayoutParams(-1, dp(44)));
+        body.addView(text("快速模式下保持贴合。可中途停止，停止后请目视确认屏幕画面。", 11, 0xff68766e));
 
         final android.widget.CheckBox letterboxBox = new android.widget.CheckBox(this);
         letterboxBox.setText("完整显示（留白，不裁掉边缘）");
@@ -1116,6 +1169,8 @@ public final class MainActivity extends Activity {
     private void startCheck(String mode) {
         if (busy || preparing || !resumed) return;
         final boolean probe = "probe".equals(mode);
+        final boolean st54l = St54lSession.supported();
+        final int rfDelta = st54l && probe ? ST_APC_DELTAS[stApcIndex] : 0;
         final String id = Long.toString(SystemClock.elapsedRealtime());
         final File sessionStop = new File(getFilesDir(), "stop-" + id);
         final File jobFile = new File(getFilesDir(), "job-" + id + ".json");
@@ -1142,19 +1197,19 @@ public final class MainActivity extends Activity {
         identityOk = false;
         qtagDenied = false;
         new Thread(() -> {
-            if (android.os.Build.VERSION.SDK_INT >= 36) ensureQtagChannel();
-            boolean ready = !sessionStop.exists()
+            if (!st54l && android.os.Build.VERSION.SDK_INT >= 36) ensureQtagChannel();
+            boolean ready = !st54l && !sessionStop.exists()
                     && RootHook.ensureReady(this, line -> main.post(() -> append(line)), true);
             main.post(() -> {
                 hookReady = ready;
                 if (destroyed) return;
                 state.setText("正在寻卡…");
                 detail.setText(probe ? "只发一条指令 + 寻卡，不改画面" : "只读取屏幕规格，不会改动画面");
-                FrontSession.start(this, mode, jobFile, sessionStop, SCAN_SECONDS,
+                FrontSession.start(this, mode, jobFile, sessionStop, SCAN_SECONDS, rfDelta,
                         (kind, message) -> event("QP|" + kind + "|" + message), () -> {
                     sessionStop.delete(); jobFile.delete(); imageFile.delete();
                     busy = false;
-                    new Thread(RootHook::releaseLease, "hook-release").start();
+                    if (!st54l) new Thread(RootHook::releaseLease, "hook-release").start();
                     if (!destroyed) {
                         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
                         progress.setVisibility(View.GONE);

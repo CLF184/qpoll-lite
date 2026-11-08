@@ -26,8 +26,13 @@
 - 相册选图（ACTION_PICK），两机统一大缩略图体验
 - 设置页可选择 **A1（默认）、A0 或 A0X**。D1 无法识别实物屏型。A0X 来自 [QPollLab 的 A0X 实现](https://github.com/CLF184/huawei-nfc-eink-android-app) 和 [luzamm 的上游 PR](https://github.com/ZhaoGY-N/huawei-nfc-eink-android-app/pull/9)，用于 A0 左右半屏顺序相反的实物。预览和发送共用一次打包结果。
 - 设置页的「发送前充能时间」可选 0–30 秒，默认 0 秒。ISO-DEP 连接后先保持贴合充能，再执行 D1 检查与传图。充能期间可停止。
+- 设置页的「刷新后供能时间」适用于快速模式，可选 0–60 秒，默认 20 秒。供能中可点击「停止并恢复 NFC」。选 0 秒或中途停止时，请目视确认刷新结果。
 
 Android 16 及以上使用已连接的 Shizuku 时，QTag 开启且前台 ReaderMode 注册后，会请求系统恢复已暂停的 NFC 轮询。可从日志中的 `POLLING_RESUME` 查看请求状态，通过「只读检查屏幕」确认能否实际读到 D1。
+
+小米 15 Pro（haotian，Android 17 / `OS4.0.0.19.XOBCNXM`）可使用 `nfc-dada-pudding-haotian-a17.zip` 的 ODM 模块。Lite 在这一机型通过 Root 启动 Ink NFC Lab 的 ST54L 辅助进程，自动注入兼容 hook、读回 7A 配置并在会话后恢复原值。保留 A0X 和 0–30 秒发送前充能，ST54L 首次 D1 最多尝试三次。设置页的 APC 实验档默认使用原厂值。
+
+此路径需要原厂 Android 17 NFC APK 和执行权限为 `755` 的 `/data/local/tmp/ink-frida-server`（Frida 17.24.0 ARM64）。App 内的注入器与 `mifare-compat.js` 由原辅助进程加载，服务端由 App 自动启动。切换前先停用会覆盖系统 NFC APK 的 `nfc-odm17`。[ST54L 辅助进程源码](https://github.com/wiwiwei/ink-nfc-lab/tree/6ffde495a9eb53acc69c4acdeee74e7fab017f30/src/dev/inknfclab) · [模块上游](https://github.com/wochgn/nfc-dada-st54l)
 
 ## 核心发现
 
