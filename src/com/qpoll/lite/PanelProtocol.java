@@ -347,6 +347,10 @@ public final class PanelProtocol {
         if(holdSeconds<0||holdSeconds>MAX_HOLD_SECONDS)
             throw new IllegalArgumentException("刷新后供能时间必须为 0–"+MAX_HOLD_SECONDS+" 秒");
     }
+    static void validatePreD4Seconds(int seconds) {
+        if(seconds<0||seconds>MAX_HOLD_SECONDS)
+            throw new IllegalArgumentException("D4 前供能时间必须为 0–"+MAX_HOLD_SECONDS+" 秒");
+    }
     static int packetChargeExtraSeconds(int every,int seconds) {
         if(every<=0||seconds<=0)return 0;
         return (MAX_TRANSFER_PACKETS/every)*seconds;
@@ -360,13 +364,18 @@ public final class PanelProtocol {
             throw new IllegalArgumentException("传输中充能总时长不能超过 "+MAX_PACKET_CHARGE_TOTAL_SECONDS+" 秒");
     }
     public boolean write(byte[] packed,boolean officialCheck,int chargeMs,int holdSeconds) throws Exception {
-        return write(packed,officialCheck,chargeMs,holdSeconds,0,0);
+        return write(packed,officialCheck,chargeMs,holdSeconds,0,0,0);
     }
     public boolean write(byte[] packed,boolean officialCheck,int chargeMs,int holdSeconds,
                          int packetChargeEvery,int packetChargeSeconds) throws Exception {
+        return write(packed,officialCheck,chargeMs,holdSeconds,0,packetChargeEvery,packetChargeSeconds);
+    }
+    public boolean write(byte[] packed,boolean officialCheck,int chargeMs,int holdSeconds,
+                         int preD4Seconds,int packetChargeEvery,int packetChargeSeconds) throws Exception {
         if(packed.length!=IMAGE_BYTES)throw new IllegalArgumentException("图像必须为 105984 字节");
         if(chargeMs<0||chargeMs>MAX_CHARGE_MS)throw new IllegalArgumentException("发送前充能时间必须为 0–30 秒");
         validateHoldSeconds(holdSeconds);
+        validatePreD4Seconds(preD4Seconds);
         validatePacketCharge(packetChargeEvery,packetChargeSeconds);
         /*
          * 0x00 蓄能实验已结案（10-31 晚，K90 实测）：0x00 模式上电等待 2000ms vs 500ms，
@@ -419,6 +428,12 @@ public final class PanelProtocol {
                     control.event("PACKET_CHARGE_DONE","供能完成，继续传输（"+confirmed+" / "+total+"）");
                 }
             }
+        }
+        if(preD4Seconds>0) {
+            control.event("STAGE","preD4|D4 前供能，保持贴合别动");
+            control.event("PRE_D4_HOLD","D4 前供能 "+preD4Seconds+" 秒（干睡，零命令）");
+            pause(preD4Seconds*1000L);
+            control.event("PRE_D4_HOLD_DONE","D4 前供能结束，发送刷新命令");
         }
         control.event("STAGE","refreshing|正在刷新屏幕，保持贴合别动（最多 30 秒）");
         control.check();

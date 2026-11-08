@@ -159,5 +159,42 @@ public final class PrechargeTest {
                     "cancelled packet charge is not reported complete");
         }
         System.out.println("PASS: packet-charge interval, bounds and cancellation");
+
+        Session preD4 = new Session();
+        preD4.protocol.write(IMAGE, false, 0, 20, 10, 0, 0);
+        require(preD4.commands.equals(defaultPackets.commands), "pre-D4 hold does not change APDUs");
+        require(preD4.refreshAt - defaultPackets.refreshAt == 10000, "D4 is sent after the configured hold");
+        require(preD4.time - defaultPackets.time == 10000, "pre-D4 hold adds only the configured seconds");
+        require(preD4.events.stream().anyMatch(event -> event.startsWith("PRE_D4_HOLD|")), "pre-D4 hold is reported");
+        require(preD4.events.stream().anyMatch(event -> event.startsWith("PRE_D4_HOLD_DONE|")),
+                "pre-D4 hold completion is reported");
+
+        Session combined = new Session();
+        combined.protocol.write(IMAGE, false, 0, 20, 5, 10, 1);
+        require(combined.time - defaultPackets.time == 5000 + ((total - 1) / 10) * 1000,
+                "pre-D4 hold and packet charge compose");
+
+        for (int invalid : new int[]{-1, 61}) {
+            Session session = new Session();
+            try {
+                session.protocol.write(IMAGE, false, 0, 20, invalid, 0, 0);
+                throw new AssertionError("invalid pre-D4 hold accepted: " + invalid);
+            } catch (IllegalArgumentException expected) {
+                require(session.commands.isEmpty() && session.time == 0, "invalid pre-D4 hold stops before APDUs");
+            }
+        }
+
+        Session cancelledPreD4 = new Session();
+        cancelledPreD4.cancelAt = 2500;
+        try {
+            cancelledPreD4.protocol.write(IMAGE, false, 0, 20, 10, 0, 0);
+            throw new AssertionError("pre-D4 hold continued after cancellation");
+        } catch (InterruptedException expected) {
+            require(cancelledPreD4.commands.stream().noneMatch(command -> command.startsWith("F0D4")),
+                    "cancelled pre-D4 hold never reaches D4");
+            require(cancelledPreD4.events.stream().noneMatch(event -> event.startsWith("PRE_D4_HOLD_DONE|")),
+                    "cancelled pre-D4 hold is not reported complete");
+        }
+        System.out.println("PASS: pre-D4 hold duration, composition and bounded cancellation");
     }
 }

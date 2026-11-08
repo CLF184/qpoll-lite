@@ -80,7 +80,8 @@ public final class ShellBridge extends Binder {
             cancel();
             new Thread(() -> {
                 long deadline = SystemClock.elapsedRealtime() + 370000
-                        + PanelProtocol.MAX_PACKET_CHARGE_TOTAL_SECONDS * 1000L;
+                        + PanelProtocol.MAX_PACKET_CHARGE_TOTAL_SECONDS * 1000L
+                        + PanelProtocol.MAX_HOLD_SECONDS * 1000L;
                 while (active && SystemClock.elapsedRealtime() < deadline) SystemClock.sleep(100);
                 System.exit(0);
             }, "nfc-destroy").start();
@@ -246,7 +247,8 @@ public final class ShellBridge extends Binder {
             final java.lang.Process running = child;
             Thread deadline = new Thread(() -> {
                 try {
-                    if (!running.waitFor(360 + PanelProtocol.MAX_PACKET_CHARGE_TOTAL_SECONDS, TimeUnit.SECONDS)) {
+                    if (!running.waitFor(360 + PanelProtocol.MAX_PACKET_CHARGE_TOTAL_SECONDS
+                            + PanelProtocol.MAX_HOLD_SECONDS, TimeUnit.SECONDS)) {
                         mark.createNewFile();
                         if (!running.waitFor(10, TimeUnit.SECONDS)) running.destroy();
                     }

@@ -20,8 +20,10 @@ public final class PanelSession {
         final int holdSeconds=refresh?job.optInt("holdSeconds",PanelProtocol.DEFAULT_HOLD_SECONDS):PanelProtocol.DEFAULT_HOLD_SECONDS;
         final int packetChargeEvery=refresh?job.optInt("packetChargeEvery",0):0;
         final int packetChargeSeconds=refresh?job.optInt("packetChargeSeconds",0):0;
+        final int preD4Seconds=refresh?job.optInt("preD4Seconds",0):0;
         if(chargeMs<0||chargeMs>PanelProtocol.MAX_CHARGE_MS)throw new IllegalArgumentException("发送前充能时间必须为 0–30 秒");
         PanelProtocol.validateHoldSeconds(holdSeconds);
+        PanelProtocol.validatePreD4Seconds(preD4Seconds);
         PanelProtocol.validatePacketCharge(packetChargeEvery,packetChargeSeconds);
         byte[] image=null;
         if(refresh) {
@@ -36,7 +38,8 @@ public final class PanelSession {
         // 保留默认 20 秒的原通信预算，并为更长的供能预留额外时间。
         long extraHoldMs=officialCheck?0:1000L*Math.max(0,holdSeconds-PanelProtocol.DEFAULT_HOLD_SECONDS);
         long extraPacketMs=1000L*PanelProtocol.packetChargeExtraSeconds(packetChargeEvery,packetChargeSeconds);
-        final long deadline=SystemClock.elapsedRealtime()+(refresh?240000+chargeMs+extraHoldMs+extraPacketMs:15000);
+        long preD4Ms=1000L*preD4Seconds;
+        final long deadline=SystemClock.elapsedRealtime()+(refresh?240000+chargeMs+extraHoldMs+extraPacketMs+preD4Ms:15000);
         PanelProtocol.Control control=new PanelProtocol.Control() {
             public long now(){return SystemClock.elapsedRealtime();}
             public void sleep(long ms)throws Exception{Thread.sleep(ms);}
@@ -70,7 +73,7 @@ public final class PanelSession {
             // 区别只在结论文案，协议层不要写图——probe 根本没有图，走 write 会空指针。
             if(mode.equals("identity")||mode.equals("probe"))protocol.identify();
             else {
-                protocol.write(image,officialCheck,chargeMs,holdSeconds,packetChargeEvery,packetChargeSeconds);
+                protocol.write(image,officialCheck,chargeMs,holdSeconds,preD4Seconds,packetChargeEvery,packetChargeSeconds);
             }
         } finally {try{iso.close();}catch(Exception e){events.emit("CLOSE_ERROR","关闭 ISO-DEP："+e);}}
     }
