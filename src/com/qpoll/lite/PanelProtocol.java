@@ -19,6 +19,10 @@ public final class PanelProtocol {
      */
     static final int DEFAULT_HOLD_SECONDS=20;
     static final int MAX_HOLD_SECONDS=60;
+    /** 实验：传输图像时每 N 包暂停供能。0 = 关闭。 */
+    static final int MAX_TRANSFER_PACKETS=476;
+    static final int MAX_PACKET_CHARGE_SECONDS=5;
+    static final int MAX_PACKET_CHARGE_TOTAL_SECONDS=300;
     /**
      * D4 之后是否持续发 {@code DE} 喂场。默认 <b>true（喂）</b>——12T 小线圈的活命开关。
      *
@@ -343,10 +347,27 @@ public final class PanelProtocol {
         if(holdSeconds<0||holdSeconds>MAX_HOLD_SECONDS)
             throw new IllegalArgumentException("刷新后供能时间必须为 0–"+MAX_HOLD_SECONDS+" 秒");
     }
+    static int packetChargeExtraSeconds(int every,int seconds) {
+        if(every<=0||seconds<=0)return 0;
+        return (MAX_TRANSFER_PACKETS/every)*seconds;
+    }
+    static void validatePacketCharge(int every,int seconds) {
+        if(every<0||every>MAX_TRANSFER_PACKETS)
+            throw new IllegalArgumentException("传输中充能间隔必须为 0–"+MAX_TRANSFER_PACKETS+" 包");
+        if(seconds<0||seconds>MAX_PACKET_CHARGE_SECONDS)
+            throw new IllegalArgumentException("传输中充能时间必须为 0–"+MAX_PACKET_CHARGE_SECONDS+" 秒");
+        if(packetChargeExtraSeconds(every,seconds)>MAX_PACKET_CHARGE_TOTAL_SECONDS)
+            throw new IllegalArgumentException("传输中充能总时长不能超过 "+MAX_PACKET_CHARGE_TOTAL_SECONDS+" 秒");
+    }
     public boolean write(byte[] packed,boolean officialCheck,int chargeMs,int holdSeconds) throws Exception {
+        return write(packed,officialCheck,chargeMs,holdSeconds,0,0);
+    }
+    public boolean write(byte[] packed,boolean officialCheck,int chargeMs,int holdSeconds,
+                         int packetChargeEvery,int packetChargeSeconds) throws Exception {
         if(packed.length!=IMAGE_BYTES)throw new IllegalArgumentException("图像必须为 105984 字节");
         if(chargeMs<0||chargeMs>MAX_CHARGE_MS)throw new IllegalArgumentException("发送前充能时间必须为 0–30 秒");
         validateHoldSeconds(holdSeconds);
+        validatePacketCharge(packetChargeEvery,packetChargeSeconds);
         /*
          * 0x00 蓄能实验已结案（10-31 晚，K90 实测）：0x00 模式上电等待 2000ms vs 500ms，
          * D4 阻塞 4.28s vs 2.55s——多出的 1.5s 全部是干等，自检失败耗时不变（约 2s），照样 68CA。
@@ -356,7 +377,8 @@ public final class PanelProtocol {
          */
         byte[] refresh=d4(POWER_MS,officialCheck); // Validate every option before any authentication/write.
         control.event("TIMING","上电等待="+POWER_MS+" ms（官方值）；查电模式="
-                +(officialCheck?"官方（屏查电，刷完才回）":"快速（收到即回，刷新后供能 "+holdSeconds+" 秒）"));
+                +(officialCheck?"官方（屏查电，刷完才回）":"快速（收到即回，刷新后供能 "+holdSeconds+" 秒）")
+                +(packetChargeEvery>0&&packetChargeSeconds>0?"；传输中每 "+packetChargeEvery+" 包供能 "+packetChargeSeconds+" 秒":""));
         if(chargeMs>0){
             control.event("STAGE","charging|发送前充能，请保持贴合");
             control.event("WAIT","charging|"+control.now()+"|"+chargeMs);
@@ -391,6 +413,11 @@ public final class PanelProtocol {
                 exchange(d3(compressed,block,sub),"D3 块 "+block+" / 包 "+sub,5000,true);
                 confirmed++;
                 if(confirmed%8==0||confirmed==total)control.event("PROGRESS",confirmed+"|"+total+"|图片传输");
+                if(packetChargeEvery>0&&packetChargeSeconds>0&&confirmed%packetChargeEvery==0&&confirmed<total) {
+                    control.event("PACKET_CHARGE","已传 "+confirmed+" / "+total+" 包；供能 "+packetChargeSeconds+" 秒，保持贴合");
+                    pause(packetChargeSeconds*1000L);
+                    control.event("PACKET_CHARGE_DONE","供能完成，继续传输（"+confirmed+" / "+total+"）");
+                }
             }
         }
         control.event("STAGE","refreshing|正在刷新屏幕，保持贴合别动（最多 30 秒）");

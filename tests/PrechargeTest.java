@@ -114,5 +114,50 @@ public final class PrechargeTest {
             require(stoppedHold.events.stream().noneMatch(event -> event.startsWith("HOLD_DONE|")), "cancelled hold is not complete");
         }
         System.out.println("PASS: selectable post-refresh hold, quick-mode scope and bounded cancellation");
+
+        Session defaultPackets = new Session();
+        defaultPackets.protocol.write(IMAGE, false, 0);
+        int total = 0;
+        for (String event : defaultPackets.events)
+            if (event.startsWith("PROGRESS|")) {
+                String[] fields = event.split("\\|", 4);
+                total = Integer.parseInt(fields[2]);
+            }
+        require(total > 0, "transfer packet count");
+
+        int every = 10, seconds = 1;
+        Session packetCharge = new Session();
+        packetCharge.protocol.write(IMAGE, false, 0, 20, every, seconds);
+        int pauses = (total - 1) / every;
+        require(packetCharge.commands.equals(defaultPackets.commands), "packet charge does not change APDUs");
+        require(packetCharge.time - defaultPackets.time == pauses * seconds * 1000L,
+                "packet charge inserts the configured pauses");
+        long chargeEvents = packetCharge.events.stream().filter(event -> event.startsWith("PACKET_CHARGE|")).count();
+        long doneEvents = packetCharge.events.stream().filter(event -> event.startsWith("PACKET_CHARGE_DONE|")).count();
+        require(chargeEvents == pauses && doneEvents == pauses, "packet charge events match pause count");
+
+        for (int[] invalid : new int[][]{{-1, 1}, {477, 1}, {10, -1}, {10, 6}, {1, 5}}) {
+            Session session = new Session();
+            try {
+                session.protocol.write(IMAGE, false, 0, 20, invalid[0], invalid[1]);
+                throw new AssertionError("invalid packet charge accepted: " + invalid[0] + "/" + invalid[1]);
+            } catch (IllegalArgumentException expected) {
+                require(session.commands.isEmpty() && session.time == 0, "invalid packet charge stops before APDUs");
+            }
+        }
+
+        Session cancelledPacket = new Session();
+        cancelledPacket.cancelAt = 2500;
+        try {
+            cancelledPacket.protocol.write(IMAGE, false, 0, 20, 10, 5);
+            throw new AssertionError("packet charge continued after cancellation");
+        } catch (InterruptedException expected) {
+            require(expected.getMessage() != null, "packet charge propagates cancellation");
+            require(cancelledPacket.commands.stream().noneMatch(command -> command.startsWith("F0D4")),
+                    "cancelled packet charge never reaches D4");
+            require(cancelledPacket.events.stream().noneMatch(event -> event.startsWith("PACKET_CHARGE_DONE|")),
+                    "cancelled packet charge is not reported complete");
+        }
+        System.out.println("PASS: packet-charge interval, bounds and cancellation");
     }
 }

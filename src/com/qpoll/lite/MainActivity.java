@@ -583,6 +583,8 @@ public final class MainActivity extends Activity {
         final int chargeSeconds = chargeSeconds();
         final boolean officialCheck = officialCheck();
         final int holdSeconds = holdSeconds();
+        final int packetChargeEvery = packetChargeEvery();
+        final int packetChargeSeconds = packetChargeSeconds();
         new AlertDialog.Builder(this)
                 .setTitle("写入这块墨水屏？")
                 .setMessage("会替换屏上当前的画面。\n\n风格：" + prepared.settings
@@ -590,13 +592,17 @@ public final class MainActivity extends Activity {
                         + "\n上电等待：" + PanelProtocol.POWER_MS + " ms（官方值）"
                         + "\n查电模式：" + (officialCheck ? "官方（刷完才回）" : "快速（收到即回）")
                         + (officialCheck ? "" : "\n刷新后供能：" + holdSeconds + " 秒")
+                        + (packetChargeEvery > 0 && packetChargeSeconds > 0
+                                ? "\n传输中充能：每 " + packetChargeEvery + " 包 / " + packetChargeSeconds + " 秒" : "")
                         + "\n屏幕类型：" + prepared.panelType
                         + "\n\n贴稳别动，全程保持本页在前台，直到提示结束。中途断开可能留下半张图。")
                 .setNegativeButton("再看看", null)
-                .setPositiveButton("开始刷新", (d, w) -> startRefresh(chargeSeconds, officialCheck, holdSeconds)).show();
+                .setPositiveButton("开始刷新", (d, w) -> startRefresh(chargeSeconds, officialCheck, holdSeconds,
+                        packetChargeEvery, packetChargeSeconds)).show();
     }
 
-    private void startRefresh(int chargeSeconds, boolean officialCheck, int holdSeconds) {
+    private void startRefresh(int chargeSeconds, boolean officialCheck, int holdSeconds,
+                              int packetChargeEvery, int packetChargeSeconds) {
         if (busy || preparing || !resumed || prepared == null) return;
         if (!prepared.panelType.equals(panelType())) { render(); return; }
         final String id = Long.toString(SystemClock.elapsedRealtime());
@@ -614,9 +620,13 @@ public final class MainActivity extends Activity {
             job.put("officialCheck", officialCheck);
             job.put("chargeMs", chargeSeconds * 1000);
             job.put("holdSeconds", holdSeconds);
+            job.put("packetChargeEvery", packetChargeEvery);
+            job.put("packetChargeSeconds", packetChargeSeconds);
             try (FileOutputStream out = new FileOutputStream(jobFile)) { out.write(job.toString().getBytes("UTF-8")); }
             append("图片参数：" + prepared.settings);
             if (chargeSeconds > 0) append("发送前充能：" + chargeSeconds + " 秒");
+            if (packetChargeEvery > 0 && packetChargeSeconds > 0)
+                append("传输中充能：每 " + packetChargeEvery + " 包 / " + packetChargeSeconds + " 秒");
         } catch (Exception e) {
             append("准备失败：" + e);
             imageFile.delete(); jobFile.delete();
@@ -693,7 +703,8 @@ public final class MainActivity extends Activity {
         boolean cancelSent = false, ended = false;
         try {
             boolean running = true;
-            long deadline = SystemClock.elapsedRealtime() + 375000;
+            long deadline = SystemClock.elapsedRealtime() + 375000
+                    + PanelProtocol.MAX_PACKET_CHARGE_TOTAL_SECONDS * 1000L;
             while (running) {
                 if (stop.exists() && !cancelSent) { cancelBridge(); cancelSent = true; }
                 request = Parcel.obtain(); reply = Parcel.obtain();
@@ -832,6 +843,14 @@ public final class MainActivity extends Activity {
         }
         if (kind.equals("HOLD_DONE")) {
             state.setText("请确认屏幕画面");
+            detail.setText(message);
+        }
+        if (kind.equals("PACKET_CHARGE")) {
+            state.setText("传输中供能");
+            detail.setText(message);
+        }
+        if (kind.equals("PACKET_CHARGE_DONE")) {
+            state.setText("正在传输图像");
             detail.setText(message);
         }
         if (kind.equals("REFRESH_DONE") || kind.equals("REFRESH_UNCONFIRMED")) {
@@ -1006,6 +1025,16 @@ public final class MainActivity extends Activity {
         return Math.max(0, Math.min(PanelProtocol.MAX_HOLD_SECONDS, saved));
     }
 
+    private int packetChargeEvery() {
+        int saved = getSharedPreferences(PREFS, MODE_PRIVATE).getInt("packetChargeEvery", 0);
+        return Math.max(0, Math.min(PanelProtocol.MAX_TRANSFER_PACKETS, saved));
+    }
+
+    private int packetChargeSeconds() {
+        int saved = getSharedPreferences(PREFS, MODE_PRIVATE).getInt("packetChargeSeconds", 0);
+        return Math.max(0, Math.min(PanelProtocol.MAX_PACKET_CHARGE_SECONDS, saved));
+    }
+
     private void showSettings() {
         LinearLayout body = new LinearLayout(this);
         body.setOrientation(LinearLayout.VERTICAL);
@@ -1081,6 +1110,42 @@ public final class MainActivity extends Activity {
         });
         body.addView(hold, new LinearLayout.LayoutParams(-1, dp(44)));
         body.addView(text("快速模式下保持贴合。可中途停止，停止后请目视确认屏幕画面。", 11, 0xff68766e));
+
+        body.addView(text("传输中充能（实验）", 13, 0xff52635d));
+        final Spinner packetEvery = new Spinner(this);
+        final int[] packetEveryValues = {0, 10, 20, 50, 100, 200};
+        String[] packetEveryLabels = {"关闭（默认）", "每 10 包", "每 20 包", "每 50 包", "每 100 包", "每 200 包"};
+        int packetEveryIndex = 0;
+        for (int i = 0; i < packetEveryValues.length; i++)
+            if (packetEveryValues[i] == packetChargeEvery()) packetEveryIndex = i;
+        final Spinner packetSeconds = new Spinner(this);
+        final int[] packetSecondValues = {0, 1, 2, 3, 5};
+        String[] packetSecondLabels = {"0 秒（不充能）", "1 秒", "2 秒", "3 秒", "5 秒"};
+        int packetSecondIndex = 0;
+        for (int i = 0; i < packetSecondValues.length; i++)
+            if (packetSecondValues[i] == packetChargeSeconds()) packetSecondIndex = i;
+        packetEvery.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, packetEveryLabels));
+        packetEvery.setSelection(packetEveryIndex);
+        packetEvery.setEnabled(!busy);
+        packetSeconds.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, packetSecondLabels));
+        packetSeconds.setSelection(packetSecondIndex);
+        packetSeconds.setEnabled(!busy && packetEveryIndex > 0);
+        packetEvery.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            public void onItemSelected(AdapterView<?> p, View v, int pos, long id) {
+                getSharedPreferences(PREFS, MODE_PRIVATE).edit().putInt("packetChargeEvery", packetEveryValues[pos]).apply();
+                packetSeconds.setEnabled(!busy && pos > 0);
+            }
+            public void onNothingSelected(AdapterView<?> p) { }
+        });
+        packetSeconds.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            public void onItemSelected(AdapterView<?> p, View v, int pos, long id) {
+                getSharedPreferences(PREFS, MODE_PRIVATE).edit().putInt("packetChargeSeconds", packetSecondValues[pos]).apply();
+            }
+            public void onNothingSelected(AdapterView<?> p) { }
+        });
+        body.addView(packetEvery, new LinearLayout.LayoutParams(-1, dp(44)));
+        body.addView(packetSeconds, new LinearLayout.LayoutParams(-1, dp(44)));
+        body.addView(text("传图每 x 包暂停 y 秒并保持贴合；实验项，默认关闭。", 11, 0xff68766e));
 
         final android.widget.CheckBox letterboxBox = new android.widget.CheckBox(this);
         letterboxBox.setText("完整显示（留白，不裁掉边缘）");
