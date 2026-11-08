@@ -156,3 +156,11 @@ ANDROID_HOME=<sdk> JAVA_HOME=<jdk17> python build-win.py
 
 - 本项目：PolyForm Noncommercial 1.0.0（非商业使用）
 - `assets/licenses/` 内含第三方许可：kur0neko/huawei-epd-pn532（协议与工厂扫描打包）、Shizuku
+
+## 致谢
+
+- **[CLF184](https://github.com/CLF184)**：[fix/nfc-polling-a0x](https://github.com/CLF184/qpoll-lite/tree/fix/nfc-polling-a0x) 三件套贡献并已合并（2026-11）——Shizuku 恢复 HyperOS 暂停的 NFC 轮询（`POLLING_RESUME`）、发送前充能 0–30 秒（`PrechargeTest`）、A0X 屏型（`PanelTypeTest`）；
+- **[luzamm](https://github.com/ZhaoGY-N/huawei-nfc-eink-android-app/pull/9)**：A0X（A0 左右半屏互换）的原初实现（上游 PR #9）；
+- **[ZhaoGY-N](https://github.com/ZhaoGY-N/huawei-nfc-eink-android-app)**：本项目演进自其 QPollLab 上游，A0 行交错映射出自 v2.10 逐字节比对结论；
+- **[HBWuChang](https://github.com/ZhaoGY-N/huawei-nfc-eink-android-app/issues/3)**：HAL 兼容层思路（0x71 发现改写 + enable 门控）的公开与 SN220 实测；**[linckr](https://github.com/ZhaoGY-N/huawei-nfc-eink-android-app/issues/5)**：`setReaderMode` 4 参兼容、`sendVendorNciMessage` API 33+ 边界、68CA 与手机壳耦合的社区实测更正。
+
